@@ -12,7 +12,7 @@ The **Alignment framework** is written in [**MATLAB**](https://mathworks.com/pro
 
 The **Alignment Methodology** and plotting functionalities are highlighted in two example scripts that showcase how the functions work and what their output comprises. The data needs to be downloaded and put in the data folders.
 The Zn data can be found [here](https://www.dropbox.com/scl/fo/q9mi4eoujh25emnq31d41/h?rlkey=90a7turjxldqsrmtebs9y5rbf&dl=1).
-The Ni based super alloy data can be found [here](https://www.dropbox.com/scl/fo/q9mi4eoujh25emnq31d41/h?rlkey=90a7turjxldqsrmtebs9y5rbf&dl=1).
+The Ni based super alloy data can be found [here](https://zenodo.org/doi/10.5281/zenodo.3691902).
 
 Make sure to follow the **sections** in the example script step by step, because options need to be specified at various locations in the script.
 
