@@ -1,0 +1,160 @@
+function [X,Y,straindata] = calcStrainsFromRawDisp(data,strain_filter)
+%%% INPUT: dic is the struct with the disp and pixel position data, inc is
+%%% the increment to calc strains, strain_filter is the smoothing used for
+%%% before strain calculation
+
+%%% written by Tijmen Vermeij, TUe, 2019-2024
+
+
+%%% should have nans already in place
+
+%%% get inc data from dic struct
+% take the data from the required increment
+X = data.X;
+Y = data.Y;
+
+U = data.U;
+V = data.V;
+
+% keep track of nan locations
+nanU = isnan(U);
+nanV = isnan(V);
+%%% define filtering option
+
+% filter displacement data to reproduce VIC-2D strain filter smoothing, see
+% function for more details
+
+% 'strain window size', specifically filter size, defined in 'data points' (i.e. in terms of the
+% stepsize used for DIC) This definition is similar to defintion of strain window in VIC-2D 
+
+% window size of 5 was used in the strain calculation of VIC-2D in the
+% present example
+
+% define filter options:
+
+% cutofffraction  , e.g. "90% center-weighted Gaussian filter" used in
+% VIC-2D (use 0.9 in this case), basically, the gaussian filter is cutoff
+% after decaying 90percent.
+% must be smaller than 1, if it is 1, it is not used 
+% options.cutofffraction = 0.9; 
+options.cutofffraction = 1; 
+
+% define which filter type to use
+% OPTION 1: Provide the standard deviation of gaussian filter (in data points!!)
+% OPTION 2: Provide the effective strain window size (in data points!!)
+options.option = 1;
+
+% define std of filter, only used for option 1
+
+options.filt_std = strain_filter;
+
+
+% define effective window size, only used for option 2
+options.EffectiveWindowSize = 5;
+
+
+%%% execute filtering
+data = filter_displacements_Johan_Tijmen(U,V,options);
+
+
+%%% calc strains from (filtered) disp data
+data = calc_E_from_disp(X,Y,data.U,data.V);
+
+Exx = data.Exx;
+Exy = data.Exy;
+Eyy = data.Eyy;
+
+Fxx = data.Fxx;
+Fxy = data.Fxy;
+Fyx = data.Fyx;
+Fyy = data.Fyy;
+
+% put NaN's back in strain field when required
+Exx(nanU)=NaN; Eyy(nanU)=NaN; Exy(nanU)=NaN; 
+
+Fxx(nanU)=NaN;
+Fxy(nanU)=NaN;
+Fyx(nanU)=NaN;
+Fyy(nanU)=NaN;
+
+
+straincutoff = 5;
+% remove all unthrusworthy data, e.g. strains above 200%
+Exx(Exx<-straincutoff|Exx>straincutoff) = NaN; 
+Eyy(Eyy<-straincutoff|Eyy>straincutoff) = NaN; 
+Exy(Exy<-straincutoff|Exy>straincutoff) = NaN; 
+
+
+% equivalent strain, assuming no strains in z-direction
+Ezz = zeros(size(Exx));
+Eequi = sqrt(2)/3 * (((Exx-Eyy).^2+(Exx).^2+(Eyy).^2) + 6*Exy.^2).^(0.5);
+
+
+
+straindata.Exx = Exx;
+straindata.Exy = Exy;
+straindata.Eyy = Eyy;
+
+straindata.Fxx = Fxx;
+straindata.Fxy = Fxy;
+straindata.Fyx = Fyx;
+straindata.Fyy = Fyy;
+
+
+straindata.Eequi = Eequi;
+
+end
+
+
+
+function [ data ] = filter_displacements_Johan_Tijmen(U,V,options)
+% filter displacement data to reproduce the usual strain filter smoothing
+
+% created by Tijmen Vermeij & Johan Hoefnagels
+
+%%% create filter
+
+
+
+if ~isfield(options,'cutofffraction')
+    options.cutofffraction = 1;
+end
+if ~isfield(options,'filt_std')
+    options.filt_std = 3;
+    warning('no filter standard deviation given, using 5 pixels');
+end
+
+filt_std = options.filt_std;
+if options.cutofffraction < 1
+    options.cutofffraction = 1;
+end
+window = ceil(15*filt_std) + 1 - rem(ceil(15*filt_std),2);
+imageFilter=fspecial('gaussian',window ,filt_std);
+
+
+
+
+
+%%% perform filtering
+
+% find nans
+nanU = isnan(U);
+nanV = isnan(V);
+
+% blur displacement fields (use nanconv script which can handle nan values well)
+if options.filt_std > 0
+    Uf = nanconv(U,imageFilter, 'nonanout','edge');
+    Vf = nanconv(V,imageFilter, 'nonanout','edge');
+else
+    Uf = U;
+    Vf = V;
+end
+
+Uf(nanU) = NaN;
+Vf(nanV) = NaN;
+
+
+data.imageFilter = imageFilter;
+data.U = Uf;
+data.V = Vf;
+end

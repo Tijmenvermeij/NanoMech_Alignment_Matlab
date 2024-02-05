@@ -1,0 +1,412 @@
+function alignmentData = pointSelectionForAlignment(dataRef,dataDef,options)
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Function for point selection for data alignment                       %
+%%% Authors: Tijmen Vermeij, Gert-Jan Slokker, Jorn Verstijnen             %
+%%% Eindhoven University of Technology; 2024                              %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% use options.sel_points_fname to use already selected points
+%%% this function gives the displacement field (from the reference to the
+%%% deformed (warped) ), on the grid of the original deformed image, which
+%%% can later be used to find the backdeformed image of the warped image to
+%%% the reference.
+%%% 
+
+%%% options.psize can be defined to use a certain pixel size in these
+%%% correlations/warping. On default, the min psize is used from the two
+%%% images
+
+
+
+%% define default options, if not found in "options"
+
+% which EBSD property to use for point selection. If empty,
+% IQ will be used. (typical Edax property)
+if ~isfield(options,'EBSD_selection')
+    options.EBSD_selection = 'iq';
+end
+
+% colormap used for some plots
+if ~isfield(options,'colormap')
+    options.colormap = jet;
+end
+
+% Type of basis functions; Anything else than 'polynomial' has not been tested
+if ~isfield(options,'basis')
+    options.basis = 'polynomial';
+end
+
+% Option to also use IPF maps, beside IQ/CI, for choosing EBSD selection point
+if ~isfield(options,'selectionIPF')
+    options.selectionIPF = 0;
+end
+
+if ~isfield(options,'sel_points_fname')
+    options.sel_points_fname = 0;
+end
+
+% define shape functions, dependent on input
+if isfield(options,'phi_fit')
+    % phi_fit is a list of DOFs, i.e. terms from a polynomial, that should be used. Mainly applicable for
+    % old codes. This variale will not be important for new users
+    phi_fit = options.phi_fit;
+    
+    % number of DOFs
+    Ndof = length(options.phi_fit);
+    options.Ndof = Ndof;
+    
+    % generate list of polynomial terms, very long to make sure there are
+    % enough terms
+    phi = dofbuild_poly(9);
+    
+    % check if none of the terms are out-of-plane terms (not used in this
+    % code)
+    if any(phi(phi_fit,3)==3)
+        error('some elements of phi_fit are out-of-plane terms. please fix (or do not define phi_fit but define "Ndof").')
+    end
+elseif isfield(options,'Ndof')
+    % if phi_fit not defined, but Ndof is, use Ndof
+    % (number of DOFs) to define the polynomial terms
+    Ndof = options.Ndof;
+    
+    % generate list of polynomial terms, very long to make sure there are
+    % enough terms
+    phi = dofbuild_poly(9);
+    
+    % define pfi_fit (list of specific DOFs), by taking the first "nDOF"
+    % terms in 2D.
+    % if Ndof == 0, then RBM should be used, which does not use phi_fit
+    phi_fit = find(phi(:,3)~=3);
+    phi_fit = phi_fit(1:Ndof);
+elseif isfield(options,'polyorder')
+    % if both not defined, but "polyorder" is defined, use that to make
+    % DOFs
+    phi = dofbuild_poly(options.polyorder);
+    phi_fit = find(phi(:,3)~=3);
+    Ndof = length(phi_fit);
+    options.Ndof = Ndof;
+else
+    % if nothing is defined, use polyorder 1
+    options.polyorder = 1;
+    phi = dofbuild_poly(options.polyorder);
+    phi_fit = find(phi(:,3)~=3);
+    Ndof = length(phi_fit);
+    options.Ndof = Ndof;
+    
+    warning('DOFs (options.Ndof or options.polyorder) were not defined. Assuming 1st order polynomial.')
+end
+
+
+% number of selection points used for alignment. 
+% Should be at least halve of the total number of DOFs
+if ~isfield(options,'Nsel')
+    % if not defined, use 1.5 times the number of DOFs (unless Ndofs == 0 (RBM),
+    % then use 3.
+    if Ndof == 0
+        options.Nsel = 3;
+    else
+        options.Nsel = round(1.5 * Ndof);
+    end
+end
+
+
+% define depth of gray level (will be changed later if required)
+grayDepth = 255;
+
+
+
+%% Give error/warning when old options are used
+
+if isfield(options,'overlay_g')
+    error('"overlay_g" option is no longer used. If IPF map is required for point selection, use "options.selectionIPF". Also, when using EmSphInX data, make sure to use "options.use_ci=1", to use CI instead of IQ.');
+end
+
+%% Extract data for alignment
+
+% extract data from STRUCTs
+switch dataRef.dtype
+    case 'EBSD'
+        error('EBSD data as ref is not possible at this point. Should not be too hard to implement though.');
+    case 'SEM'
+        refIm = dataRef.data;
+        XRef = dataRef.X;
+        YRef = dataRef.Y;
+        grayDepth = max(refIm(:));
+    case 'mat_data'
+        refIm = dataRef.data;
+        refIm = rescale(refIm,1,grayDepth);
+        XRef = dataRef.X;
+        YRef = dataRef.Y;
+   otherwise
+        error('REF data type not supported')     
+end
+
+
+switch dataDef.dtype
+    case 'EBSD'
+        % for EBSD data, take negative value of IQ, or some other specified property, and
+        % rescale gray values
+        defIm = dataDef.data_grid.prop.(options.EBSD_selection);
+        
+        defIm =  rescale(-1 * defIm,1,grayDepth);
+    case 'SEM' 
+        defIm = dataDef.data;
+    case 'mat_data'
+        defIm = dataDef.data;
+        defIm = rescale(defIm,1,grayDepth);
+    otherwise
+        error('REF data type not supported')
+end 
+
+
+% % remove NaNs, probably not necessary
+% defIm(isnan(defIm)) = 0;
+% refIm(isnan(refIm)) = 0;
+
+Nsel = options.Nsel;
+
+
+%% Start point selection procedure
+
+%%% initiate and load required data %%%
+u    = zeros(Ndof,1);
+
+% for imagesc plotting, need x and y array
+xRef = XRef(1,:);
+yRef = YRef(:,1)';
+
+xDef = dataDef.X(1,:);
+yDef = dataDef.Y(:,1)';
+
+% check if a "selection of points" variable exists; in that case, load the
+% file containing that data.
+if ischar(options.sel_points_fname)
+    loaddata = load(options.sel_points_fname);
+    % reference and deformed config selection point coordinates
+    fsel = loaddata.fsel;
+    gsel = loaddata.gsel;
+    % make the new starting point for further selection points
+    k_start = size(fsel,1)+1;
+else
+    k_start=1;
+end
+
+% filename for saving of temporary data (i.e. selection points...)
+if isfield(options, 'case')
+    Filename_temp_save = sprintf('Selection_Points_Backup_%s_%s', options.case, datestr(now,'mm-dd-yyyy_HH-MM') );
+else
+    Filename_temp_save = sprintf('Selection_Points_Backup_%s', datestr(now,'mm-dd-yyyy_HH-MM'));
+end
+
+
+
+%%% plot the required maps and initial selection points, if any %%%
+
+% decide on number of subplots
+if options.selectionIPF
+    Nsubplot = 3;
+else
+    Nsubplot = 2;
+end
+
+% plot ref
+figure('Position',get(0,'ScreenSize'), 'Name', 'SelectionPoints');
+ha(1) = subplot(1,Nsubplot,1);
+imagesc(xRef,yRef,refIm,'parent', ha(1));
+title('ref')
+daspect([1 1 1])
+colormap(options.colormap);
+hold on
+for k = 1:k_start-1
+    plot(fsel(k,1),fsel(k,2),'or',fsel(k,1),fsel(k,2),'xb','parent', ha(1));
+end
+
+% plot def (1)
+ha(2) = subplot(1,Nsubplot,2);
+imagesc(xDef,yDef,defIm,'parent', ha(2));
+title('def (1)')
+colormap(options.colormap);
+daspect([1 1 1])
+hold on
+for k = 1:k_start-1
+    plot(gsel(k,1),gsel(k,2),'or',gsel(k,1),gsel(k,2),'xb','parent', ha(2));
+end
+
+% if necessary, plot def (2)
+if options.selectionIPF
+    % plot def (2), IPF map
+    ha(3) = subplot(1,Nsubplot,3);
+    plot(dataDef.data_grid,dataDef.data_grid.orientations,'parent', ha(3))
+    hold on
+    for k = 1:k_start-1
+        plot(gsel(k,1),gsel(k,2),'or',gsel(k,1),gsel(k,2),'xb','parent', ha(3));
+    end
+end
+
+
+
+%%% manual (mouse) selection of points %%%
+
+if ~(k_start==Nsel+1)
+    for k = k_start:Nsel
+        set(gcf,'CurrentAxes',ha(1))
+        title(sprintf('Sel. Point %d; Zoom in on ref image (you can also zoom in on def already), find feature and press space',k))
+
+        shg; pause;
+        title(sprintf('Select a material point in ref (point %d)',k))
+        fsel(k,:) = My_ginput(1);
+        set(gca,'NextPlot','Add')
+        plot(fsel(k,1),fsel(k,2),'or',fsel(k,1),fsel(k,2),'xb');
+        title('')
+
+        set(gcf,'CurrentAxes',ha(2))
+        title(sprintf('Zoom in on def image (can also do on IPF), find feature and press space'))
+
+        shg; pause;
+        title(sprintf('select the same material point in def (or in IPF) (%d)',k))
+        gsel(k,:) = My_ginput(1);
+        set(gca,'NextPlot','Add')
+        plot(gsel(k,1),gsel(k,2),'or',gsel(k,1),gsel(k,2),'xb');
+        title('')
+        
+        if options.selectionIPF
+            set(gcf,'CurrentAxes',ha(3))
+            set(gca,'NextPlot','Add')
+            plot(gsel(k,1),gsel(k,2),'or',gsel(k,1),gsel(k,2),'xb');
+            
+            
+            set(gcf,'CurrentAxes',ha(2))
+            set(gca,'NextPlot','Add')
+            plot(gsel(k,1),gsel(k,2),'or',gsel(k,1),gsel(k,2),'xb');
+            
+        end
+
+        % reset the zoom
+        set(ha(1),'xlim',[min(xRef) max(xRef)])
+        set(ha(1),'ylim',[min(yRef) max(yRef)])
+        
+        set(ha(2),'xlim',[min(xRef) max(xRef)])
+        set(ha(),'ylim',[min(yRef) max(yRef)])
+
+        save(Filename_temp_save,'fsel','gsel');
+    end
+end
+close SelectionPoints
+
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Use selection points to generate displacement field for warping %%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Two cases: 
+%%% 1) Ndof == 0 --> use only rigid body translation and rotation,
+%%% with an external function "absor" (written by Matt Jacobson, Xoran Tech).
+%%% 2) Ndof > 0 --> Use basis functions of the polynomial to generate
+%%% values of the DOFs that best fits the selected coordinates in the two
+%%% images.
+%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+if Ndof == 0
+    
+    % run absor using selection point coordinates
+    [regParams,Bfit,ErrorStats] = absor(fsel',gsel');
+
+    % generate displacement fields using translation and rotation
+    % parameters
+    Ux = XRef * regParams.R(1,1) + YRef * regParams.R(1,2) + regParams.t(1) - XRef;
+    Uy = XRef * regParams.R(2,1) + YRef * regParams.R(2,2) + regParams.t(2) - YRef;
+    
+    % make other variables that are saved but keep them empty
+    u=[];
+else
+    
+    regParams = [];
+    
+    % store coordinates and displacements in struct
+    sel.x = fsel(:,1);
+    sel.y = fsel(:,2);
+    sel.ux = gsel(:,1) - fsel(:,1);
+    sel.uy = gsel(:,2) - fsel(:,2);
+
+    % stack the selected displacements
+    sel.u = [sel.ux ; sel.uy];
+
+    % compute the values of the degrees of freedom
+    
+    
+    [Xgrid, Ygrid] = meshgrid(xRef,yRef);
+    Nfit = length(phi_fit);
+    phimatrix = zeros(2*Nsel,Nfit);
+    
+    options.normalized = 0;
+    for i = 1:Nfit
+        kdof = phi_fit(i);
+        % get the basis functions
+        [Phi, dir] = basis(xRef,yRef,phi,kdof,options);
+        % interpolate the basis function values in the selected locations
+        Phi = interp2(Xgrid,Ygrid,Phi,sel.x,sel.y,'linear');
+
+        % stack the basis function values into a matrix
+        if dir == 1
+            % for x
+            phimatrix(1:Nsel,i) = Phi(:);
+        elseif dir == 2
+            % for y
+            phimatrix(Nsel+1:end,i) = Phi(:);
+        end
+    end
+    % interpret the selection
+    ufit = phimatrix \ sel.u;
+    save(Filename_temp_save,'ufit','fsel','gsel');
+
+    u(phi_fit) = ufit;
+
+    
+    % extract displacement fields on f
+    
+    
+    Ux = zeros(size(XRef));
+    Uy = zeros(size(YRef));
+    % loop over the baisfunctions
+    for kdof = 1:length(u)
+        % call each basis function
+        [Phi, dir] = basis(XRef(1,:),YRef(:,1)',phi,kdof,options);
+        % rebuild the displacement fields
+        if dir == 1
+            Ux  = Ux + u(kdof) * Phi ;
+        elseif dir == 2
+            Uy  = Uy + u(kdof) * Phi ;
+    %             elseif dir == 3
+    %                 Uz  = Uz + u(kdof) * Phi ;
+    %             else
+    %                 error('unexpected value for the direction of phi')
+        end
+    end 
+end
+
+
+
+% store variables in alignment_data struct
+
+alignmentData.regParams = regParams;
+alignmentData.phi = phi;
+alignmentData.u = u;
+alignmentData.ref_fname = dataRef.fname;
+alignmentData.def_fname = dataDef.fname;
+
+alignmentData.X = XRef;
+alignmentData.Y = YRef;
+
+alignmentData.Ux = Ux;
+alignmentData.Uy = Uy;
+
+alignmentData.fsel = fsel;
+alignmentData.gsel = gsel;
+
+alignmentData.options = options;
+
+    
+
+
+
+end
